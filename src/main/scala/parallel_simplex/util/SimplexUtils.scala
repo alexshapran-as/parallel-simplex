@@ -137,6 +137,7 @@ object SimplexUtils {
         val free2PermissiveRatios = gpuUtils.getColumnsRatios(
             0, permissiveColumnIndex,
             Double.NaN,
+            // на GPU нет возможности работать с Boolean, поэтому преобразуем в 0 или 1
             if (skipByNegativeDivision) 1 else 0, Double.NaN
         )
         // поиск индекса строки, в которой отношение
