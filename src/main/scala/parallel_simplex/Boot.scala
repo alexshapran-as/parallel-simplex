@@ -10,7 +10,6 @@ object Boot {
     def main(args: Array[String]): Unit = {
         logger.info(s"***** Parallel simplex *****")
 
-        // TODO: запись из файла
         // F = x_0 + x_1 + ... + x_m -> min
         // x_0 + ... + x_m >= 1;
         // x_0, ..., x_m - свободные переменные
