@@ -4,7 +4,8 @@ import GPU._
 import parallel_simplex.models.Matrix
 
 import scala.annotation.tailrec
-import scala.util.Try
+import scala.reflect.ClassTag
+import scala.util.{Success, Try}
 
 // -------------------------------------------------------------------------------------------------------------
 // * Симплекс
@@ -37,6 +38,139 @@ object SimplexUtils {
                     gpuUtils.getObjectiveFunction
                 )
             }
+        }
+    }
+
+    def solveCPU(
+                    simplexMatrix: Matrix,
+                    basicVariables: Array[Int],
+                    variables: Array[Int]
+                ): Either[String, (Array[Double], Array[Int], Array[Int], Double)] = {
+
+        // -------------------------------------------------------------------------------------------------------------
+        // * Симплекс
+        // -------------------------------------------------------------------------------------------------------------
+
+        val zeroEpsilon = 0.000001
+
+        def roundWithScale(decimal: Double, scale: Int): Double =
+            BigDecimal(decimal).setScale(scale, BigDecimal.RoundingMode.HALF_UP).toDouble
+
+        def isNumberZero(number: Double): Boolean = math.abs(number) <= zeroEpsilon
+
+        // Поиск разрешающей строки по разрешающему столбцу
+        def getPermissiveRowIndex(matrix: Matrix, permissiveColumnIndex: Int, skipByNegDiv: Boolean = false): Option[Int] = Try {
+            val matrixTransposed = matrix.transpose
+            val freeColumnValues = matrixTransposed.matrix.head.init
+            val permissiveColumnValues = matrixTransposed.matrix(permissiveColumnIndex).init
+            val permissiveRowIndex = freeColumnValues.zip(permissiveColumnValues)
+                .zipWithIndex
+                .filter(x => !isNumberZero(x._1._2))
+                .filter(x => if (skipByNegDiv) x._1._2 >= 0 else true)
+                .map {
+                    case ((freeColumnValue, permissiveColumnValue), rowIndex) =>
+                        (freeColumnValue / permissiveColumnValue, rowIndex)
+                }.filter(_._1 >= 0.0).minBy(_._1)._2
+            Some(permissiveRowIndex)
+        }.recover {
+            case exception: Exception =>
+                println(exception.getMessage)
+                None
+        }.get
+
+        // Замена базиса
+        def changeBasicVariables[T: ClassTag](basicVariables: Array[T],
+                                                      variables: Array[T],
+                                                      permissiveRowIndex: Int,
+                                                      permissiveColumnIndex: Int): (Array[T], Array[T]) = {
+            (
+                basicVariables.patch(permissiveRowIndex, Array[T](variables(permissiveColumnIndex - 1)), 1),
+                variables.patch(permissiveColumnIndex - 1, Array[T](basicVariables(permissiveRowIndex)), 1)
+            )
+        }
+
+        // Жордановы исключения
+        def computeJordanExceptions(matrix: Matrix,
+                                            permissiveRowIndex: Int,
+                                            permissiveColumnIndex: Int): Matrix = {
+            val matrixCopy = matrix
+            Matrix(matrixCopy.matrix.zipWithIndex.map { case (row, rowIndex) =>
+                row.zipWithIndex.map { case (value, columnIndex) =>
+                    if (rowIndex == permissiveRowIndex && columnIndex == permissiveColumnIndex) {
+                        roundWithScale(1 / matrix.matrix(permissiveRowIndex)(permissiveColumnIndex), 5)
+                    } else if (rowIndex == permissiveRowIndex) {
+                        roundWithScale(value / matrix.matrix(permissiveRowIndex)(permissiveColumnIndex), 5)
+                    } else if (columnIndex == permissiveColumnIndex) {
+                        roundWithScale(-value / matrix.matrix(permissiveRowIndex)(permissiveColumnIndex), 5)
+                    } else {
+                        roundWithScale(value - ((row(permissiveColumnIndex) * matrix.matrix(permissiveRowIndex)(columnIndex)) / matrix.matrix(permissiveRowIndex)(permissiveColumnIndex)), 5)
+                    }
+                }
+            })
+        }
+
+        // Поиск опорного решения
+        @tailrec
+        def findReferenceSolutionCPU[T: ClassTag](matrix: Matrix,
+                                                  basicVariables: Array[T],
+                                                  variables: Array[T]): Option[(Matrix, Array[T], Array[T])] = {
+            val matrixTransposed = matrix.transpose
+            matrixTransposed.matrix.head.zipWithIndex.init.find(_._1 < 0.0) match {
+                case Some((_, freeRowIndex)) =>
+                    matrix.matrix(freeRowIndex).zipWithIndex.tail.find(_._1 < 0.0) match {
+                        case Some((_, permissiveColumnIndex)) =>
+                            getPermissiveRowIndex(matrix, permissiveColumnIndex) match {
+                                case Some(permissiveRowIndex) =>
+                                    val (newBasicVariables, newVariables) = changeBasicVariables(basicVariables, variables, permissiveRowIndex, permissiveColumnIndex)
+                                    val newMatrix = computeJordanExceptions(matrix, permissiveRowIndex, permissiveColumnIndex)
+                                    findReferenceSolutionCPU(newMatrix, newBasicVariables, newVariables)
+                                case _ =>
+                                    None
+                            }
+                        case _ =>
+                            None
+                    }
+                case _ =>
+                    Some(matrix, basicVariables, variables)
+            }
+        }
+
+        // Поиск оптимального решения
+        @tailrec
+        def findOptimalSolutionCPU[T: ClassTag](matrix: Matrix,
+                                                basicVariables: Array[T],
+                                                variables: Array[T]): Option[(Matrix, Array[T], Array[T])] = {
+            matrix.matrix.last.zipWithIndex.tail.find(_._1 > 0) match {
+                case Some((_, permissiveColumnIndex)) =>
+                    getPermissiveRowIndex(matrix, permissiveColumnIndex, true) match {
+                        case Some(permissiveRowIndex) =>
+                            val (newBasicVariables, newVariables) = changeBasicVariables(basicVariables, variables, permissiveRowIndex, permissiveColumnIndex)
+                            val newMatrix = computeJordanExceptions(matrix, permissiveRowIndex, permissiveColumnIndex)
+                            findOptimalSolutionCPU(newMatrix, newBasicVariables, newVariables)
+                        case _ =>
+                            None
+                    }
+                case _ =>
+                    Some(matrix, basicVariables, variables)
+            }
+        }
+
+        def simplex[T: ClassTag](matrix: Matrix,
+                                 basicVariables: Array[T],
+                                 variables: Array[T]): Option[(Matrix, Array[T], Array[T])] = {
+            findReferenceSolutionCPU(matrix, basicVariables, variables) flatMap {
+                case (matrixReference, basicVariablesReference, variablesReference) =>
+                    findOptimalSolutionCPU(matrixReference, basicVariablesReference, variablesReference)
+            }
+        }
+
+        Try { simplex(simplexMatrix, basicVariables, variables) } match {
+            case Success(Some((matrixSolution, basicVariablesSolution, variablesSolution))) =>
+                val solution = matrixSolution.transpose.matrix.head.init ++ Array.fill(matrixSolution.getMatrixColumnsCount - 1)(0.0)
+                val objectiveFunction = matrixSolution.matrix.last.head
+                Right((solution, basicVariablesSolution, variablesSolution, objectiveFunction))
+            case _ =>
+                Left("Some error")
         }
     }
 

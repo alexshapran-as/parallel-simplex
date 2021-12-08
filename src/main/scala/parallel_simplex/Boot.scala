@@ -23,9 +23,26 @@ object Boot {
             val simplexMatrix = Matrix(m)
             val variables = (0 until system.getMatrixColumnsCount).toArray
             val basicVariables = (variables.length until variables.length + system.getMatrixRowsCount).toArray
+
+            val startCPU = System.currentTimeMillis()
+            SimplexUtils.solveCPU(simplexMatrix, basicVariables, variables).map {
+                case (solution, basicVariablesSolution, variablesSolution, objFunction) =>
+                    val solutionMsg = {
+                        val varValues = solution zip (basicVariablesSolution ++ variablesSolution) map {
+                            case (value, variable) => s"x_$variable = $value;"
+                        }
+                        val objFValue = s"F = $objFunction."
+                        varValues :+ objFValue mkString("\n")
+                    }
+                    println("Решение на CPU:\n" + solutionMsg)
+            }
+            val endCPU = System.currentTimeMillis()
+            println(s"Время решения на CPU:${(endCPU-startCPU) / 1000.0} sec")
+
             SimplexUtils.init(simplexMatrix, basicVariables, variables)
         }
 
+        val startGPU = System.currentTimeMillis()
         SimplexUtils.solve().map {
             case (solution, basicVariablesSolution, variablesSolution, objFunction) =>
                 val solutionMsg = {
@@ -35,7 +52,9 @@ object Boot {
                     val objFValue = s"F = $objFunction."
                     varValues :+ objFValue mkString("\n")
                 }
-                println("Решение:\n" + solutionMsg)
+                println("Решение на GPU:\n" + solutionMsg)
         }
+        val endGPU = System.currentTimeMillis()
+        println(s"Время решения на GPU:${(endGPU-startGPU) / 1000.0} sec")
     }
 }
